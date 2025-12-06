@@ -8,3 +8,7 @@ restartPolicyMaxRetries = 5
 
 [env]
 PORT = "2006"
+MONGO_URI = "mongodb+srv://server:server@server.cqal4te.mongodb.net/server?appName=server"
+CLOUDINARY_CLOUD_NAME = "server"
+CLOUDINARY_API_KEY = "693155792354671"
+CLOUDINARY_API_SECRET = "Jzx3aXzUC5FZzGfj87jOJlQMYws"

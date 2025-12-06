@@ -2,8 +2,16 @@ import express from "express";
 import mongoose from "mongoose";
 import cors from "cors";
 import dotenv from "dotenv";
+import { v2 as cloudinary } from "cloudinary";
 
 dotenv.config();
+
+// Konfigurasi Cloudinary
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
 
 const app = express();
 app.use(cors());
@@ -32,13 +40,41 @@ async function connectMongo() {
   }
 }
 
+// Test route untuk Cloudinary
+app.get("/test-cloudinary", async (req, res) => {
+  try {
+    // Test koneksi Cloudinary
+    const result = await cloudinary.api.ping();
+    res.json({
+      success: true,
+      message: "✅ Cloudinary connected successfully!",
+      cloudinary: result
+    });
+  } catch (error) {
+    console.error("❌ Cloudinary connection error:", error);
+    res.status(500).json({
+      success: false,
+      message: "❌ Cloudinary connection failed",
+      error: error.message
+    });
+  }
+});
+
+// Upload endpoint (akan dikembangkan nanti)
+app.post("/upload", (req, res) => {
+  res.json({
+    message: "Upload endpoint ready - will handle image uploads to Cloudinary"
+  });
+});
+
 app.get("/", (req, res) => {
-  res.send("Server berjalan & MongoDB terkoneksi!");
+  res.send("Server berjalan & MongoDB terkoneksi! Cloudinary siap digunakan.");
 });
 
 const PORT = process.env.PORT || 2006;
 
 app.listen(PORT, () => {
   console.log("🚀 Server running on port", PORT);
+  console.log("☁️  Cloudinary configured with cloud_name:", process.env.CLOUDINARY_CLOUD_NAME);
   connectMongo();
 });
