@@ -47,7 +47,7 @@ app.get("/test-cloudinary", async (req, res) => {
     const result = await cloudinary.api.ping();
     res.json({
       success: true,
-      message: "✅ Cloudinary connected successfully!",
+      message: "✅Cloudinary connected successfully!",
       cloudinary: result
     });
   } catch (error) {
@@ -75,6 +75,6 @@ const PORT = process.env.PORT || 2006;
 
 app.listen(PORT, () => {
   console.log("🚀 Server running on port", PORT);
-  console.log("☁️  Cloudinary configured with cloud_name:", process.env.CLOUDINARY_CLOUD_NAME);
+  console.log("✅  Cloudinary configured with cloud_name:", process.env.CLOUDINARY_CLOUD_NAME);
   connectMongo();
 });
