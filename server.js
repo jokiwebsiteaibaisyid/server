@@ -64,7 +64,8 @@ const chatSchema = new mongoose.Schema({
   fileType: String, // 'image', 'video', 'pdf', 'word', 'other'
   fileSize: Number,
   timestamp: { type: Date, default: Date.now },
-  isRead: { type: Boolean, default: false }
+  isRead: { type: Boolean, default: false },
+  roomId: String // Tambahkan roomId untuk grouping chat
 });
 
 const Chat = mongoose.model('Chat', chatSchema);
@@ -76,7 +77,8 @@ const userStatusSchema = new mongoose.Schema({
   userRole: String,
   isOnline: Boolean,
   lastSeen: Date,
-  socketId: String
+  socketId: String,
+  email: String // Tambahkan email untuk identifikasi
 });
 
 const UserStatus = mongoose.model('UserStatus', userStatusSchema);
@@ -104,6 +106,12 @@ async function connectMongo() {
   }
 }
 
+// Helper function untuk membuat roomId unik
+function generateRoomId(userId1, userId2) {
+  const ids = [userId1, userId2].sort();
+  return `room_${ids[0]}_${ids[1]}`;
+}
+
 // Socket.IO connection handling
 io.on('connection', (socket) => {
   console.log('🔗 New client connected:', socket.id);
@@ -111,7 +119,7 @@ io.on('connection', (socket) => {
   // User join room
   socket.on('join', async (userData) => {
     try {
-      const { userId, userName, userRole } = userData;
+      const { userId, userName, userRole, email } = userData;
       
       // Update atau buat user status
       await UserStatus.findOneAndUpdate(
@@ -119,6 +127,7 @@ io.on('connection', (socket) => {
         {
           userName,
           userRole,
+          email,
           isOnline: true,
           lastSeen: new Date(),
           socketId: socket.id
@@ -126,13 +135,24 @@ io.on('connection', (socket) => {
         { upsert: true, new: true }
       );
 
+      // Join personal room
       socket.join(`user_${userId}`);
       
+      // Join rooms berdasarkan role untuk broadcast
+      if (userRole === 'user') {
+        socket.join('users_group');
+      } else if (userRole === 'sub_admin') {
+        socket.join('sub_admins_group');
+      } else if (userRole === 'admin') {
+        socket.join('admins_group');
+      }
+
       // Notify all users about online status
       io.emit('user_status', {
         userId,
         userName,
         userRole,
+        email,
         isOnline: true
       });
 
@@ -159,6 +179,9 @@ io.on('connection', (socket) => {
         fileSize
       } = messageData;
 
+      // Generate room ID untuk kedua pengguna
+      const roomId = generateRoomId(senderId, receiverId);
+
       // Simpan ke database
       const chat = new Chat({
         senderId,
@@ -172,18 +195,19 @@ io.on('connection', (socket) => {
         fileName,
         fileType,
         fileSize,
+        roomId,
         timestamp: new Date()
       });
 
       await chat.save();
 
-      // Kirim ke receiver
+      // Kirim ke receiver personal room
       io.to(`user_${receiverId}`).emit('receive_message', {
         ...chat._doc,
         timestamp: chat.timestamp.toISOString()
       });
 
-      // Kirim kembali ke sender sebagai konfirmasi
+      // Kirim ke sender sebagai konfirmasi
       socket.emit('message_sent', {
         ...chat._doc,
         timestamp: chat.timestamp.toISOString()
@@ -201,14 +225,11 @@ io.on('connection', (socket) => {
     try {
       const { userId, otherUserId, limit = 50 } = data;
       
-      const chats = await Chat.find({
-        $or: [
-          { senderId: userId, receiverId: otherUserId },
-          { senderId: otherUserId, receiverId: userId }
-        ]
-      })
-      .sort({ timestamp: -1 })
-      .limit(limit);
+      const roomId = generateRoomId(userId, otherUserId);
+      
+      const chats = await Chat.find({ roomId })
+        .sort({ timestamp: -1 })
+        .limit(limit);
 
       socket.emit('chat_history', {
         chats: chats.reverse().map(chat => ({
@@ -221,16 +242,16 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Get online users
+  // Get online users berdasarkan role
   socket.on('get_online_users', async (data) => {
     try {
-      const { userRole, currentUserId } = data;
+      const { userRole, currentUserId, currentUserEmail } = data;
       
       let query = { isOnline: true, userId: { $ne: currentUserId } };
       
       // Admin bisa lihat semua user
-      // Sub admin hanya bisa lihat user biasa
-      // User hanya bisa lihat admin dan sub admin
+      // Sub admin hanya bisa lihat user biasa (tidak bisa lihat admin lain)
+      // User hanya bisa lihat admin dan sub admin (tidak bisa lihat user lain)
       if (userRole === 'sub_admin') {
         query.userRole = 'user';
       } else if (userRole === 'user') {
@@ -243,11 +264,43 @@ io.on('connection', (socket) => {
         userId: user.userId,
         userName: user.userName,
         userRole: user.userRole,
+        email: user.email,
         isOnline: user.isOnline,
         lastSeen: user.lastSeen
       })));
     } catch (error) {
       console.error('Error getting online users:', error);
+    }
+  });
+
+  // Get all users untuk admin/sub-admin (untuk dropdown pilih user)
+  socket.on('get_all_users', async (data) => {
+    try {
+      const { userRole } = data;
+      
+      let query = {};
+      
+      // Filter berdasarkan role yang bisa dilihat
+      if (userRole === 'sub_admin') {
+        query.userRole = 'user';
+      } else if (userRole === 'user') {
+        // User tidak bisa melihat user lain, hanya admin/sub-admin
+        socket.emit('all_users', []);
+        return;
+      }
+
+      const allUsers = await UserStatus.find(query);
+      
+      socket.emit('all_users', allUsers.map(user => ({
+        userId: user.userId,
+        userName: user.userName,
+        userRole: user.userRole,
+        email: user.email,
+        isOnline: user.isOnline,
+        lastSeen: user.lastSeen
+      })));
+    } catch (error) {
+      console.error('Error getting all users:', error);
     }
   });
 
@@ -265,9 +318,10 @@ io.on('connection', (socket) => {
   socket.on('mark_as_read', async (data) => {
     try {
       const { senderId, receiverId } = data;
+      const roomId = generateRoomId(senderId, receiverId);
       
       await Chat.updateMany(
-        { senderId, receiverId, isRead: false },
+        { roomId, receiverId, isRead: false },
         { $set: { isRead: true } }
       );
 
@@ -299,6 +353,7 @@ io.on('connection', (socket) => {
           userId: userStatus.userId,
           userName: userStatus.userName,
           userRole: userStatus.userRole,
+          email: userStatus.email,
           isOnline: false
         });
 
@@ -353,22 +408,14 @@ app.get("/api/chats", async (req, res) => {
   try {
     const { userId, otherUserId, page = 1, limit = 20 } = req.query;
     
-    const chats = await Chat.find({
-      $or: [
-        { senderId: userId, receiverId: otherUserId },
-        { senderId: otherUserId, receiverId: userId }
-      ]
-    })
-    .sort({ timestamp: -1 })
-    .skip((page - 1) * limit)
-    .limit(parseInt(limit));
+    const roomId = generateRoomId(userId, otherUserId);
+    
+    const chats = await Chat.find({ roomId })
+      .sort({ timestamp: -1 })
+      .skip((page - 1) * limit)
+      .limit(parseInt(limit));
 
-    const total = await Chat.countDocuments({
-      $or: [
-        { senderId: userId, receiverId: otherUserId },
-        { senderId: otherUserId, receiverId: userId }
-      ]
-    });
+    const total = await Chat.countDocuments({ roomId });
 
     res.json({
       success: true,
@@ -407,6 +454,7 @@ app.get("/api/online-users", async (req, res) => {
         userId: user.userId,
         userName: user.userName,
         userRole: user.userRole,
+        email: user.email,
         isOnline: user.isOnline,
         lastSeen: user.lastSeen
       }))
@@ -423,13 +471,14 @@ app.get("/api/online-users", async (req, res) => {
 // Endpoint untuk update user status
 app.post("/api/update-status", async (req, res) => {
   try {
-    const { userId, userName, userRole, isOnline } = req.body;
+    const { userId, userName, userRole, email, isOnline } = req.body;
     
     await UserStatus.findOneAndUpdate(
       { userId },
       {
         userName,
         userRole,
+        email,
         isOnline,
         lastSeen: new Date()
       },
@@ -445,6 +494,45 @@ app.post("/api/update-status", async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Gagal update status"
+    });
+  }
+});
+
+// Endpoint untuk mendapatkan semua users (untuk admin/sub-admin)
+app.get("/api/all-users", async (req, res) => {
+  try {
+    const { userRole } = req.query;
+    
+    let query = {};
+    
+    if (userRole === 'sub_admin') {
+      query.userRole = 'user';
+    } else if (userRole === 'user') {
+      // User tidak bisa melihat user lain
+      return res.json({
+        success: true,
+        users: []
+      });
+    }
+
+    const allUsers = await UserStatus.find(query);
+    
+    res.json({
+      success: true,
+      users: allUsers.map(user => ({
+        userId: user.userId,
+        userName: user.userName,
+        userRole: user.userRole,
+        email: user.email,
+        isOnline: user.isOnline,
+        lastSeen: user.lastSeen
+      }))
+    });
+  } catch (error) {
+    console.error("❌ Get all users error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Gagal mengambil data users"
     });
   }
 });
